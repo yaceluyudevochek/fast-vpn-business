@@ -115,15 +115,17 @@ caddy-selfsteal/
 ### Сам установщик
 
 ```bash
-# Первый запуск (curl | bash сам склонирует репозиторий во временный каталог)
+# Первый запуск — сам склонирует репозиторий в /opt/fast-vpn-business
 curl -fsSL https://raw.githubusercontent.com/yaceluyudevochek/fast-vpn-business/main/install.sh -o install.sh
 sudo bash install.sh
 
-# Повторный запуск меню из уже склонированного репозитория
-cd fast-vpn-business && sudo bash install.sh
+# Открыть меню повторно (без повторного скачивания) — репозиторий уже лежит здесь:
+sudo bash /opt/fast-vpn-business/install.sh
 
-# Обновить установщик и бот до последней версии из git, затем перезапустить меню
-cd fast-vpn-business && git pull && sudo bash install.sh
+# Обновить установщик и бот до последней версии из git, затем открыть меню
+# (install.sh делает это автоматически при каждом запуске через curl-обёртку,
+# но можно и вручную):
+cd /opt/fast-vpn-business && git pull && sudo bash install.sh
 
 # Полная очистка того, что стоит на этом сервере (пункт меню 6), без диалога:
 # просто откройте install.sh и выберите нужный пункт — отдельного флага

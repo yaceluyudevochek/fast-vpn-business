@@ -3,35 +3,44 @@
 # Fast VPN Business — универсальный установщик VPN-бизнеса под ключ:
 # Remnawave Panel + Subscription Page + Nodes + Telegram-бот (white-label).
 #
-# Запуск:
-#   curl -fsSL https://raw.githubusercontent.com/<org>/fast-vpn-business/main/install.sh -o install.sh
+# Первый запуск:
+#   curl -fsSL https://raw.githubusercontent.com/yaceluyudevochek/fast-vpn-business/main/install.sh -o install.sh
 #   sudo bash install.sh
 #
-# Или локально из клонированного репозитория:
-#   sudo bash install.sh
+# Повторный запуск (репозиторий уже склонирован в /opt/fast-vpn-business):
+#   sudo bash /opt/fast-vpn-business/install.sh
 #
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---------------------------------------------------------------------------
-# Если скрипт запущен через curl | bash (нет modules/ рядом) — скачиваем
-# остальной репозиторий во временный каталог и переисполняем оттуда.
+# Если скрипт запущен через curl | bash (нет modules/ рядом) — клонируем
+# репозиторий в постоянный каталог /opt/fast-vpn-business (а не во
+# временный, чтобы меню можно было открыть повторно без повторного
+# скачивания) и переисполняем оттуда. Если каталог уже существует —
+# обновляем его через git pull.
 # ---------------------------------------------------------------------------
 if [[ ! -d "$SCRIPT_DIR/modules" ]]; then
     REPO_URL="${FASTVPN_REPO_URL:-https://github.com/yaceluyudevochek/fast-vpn-business}"
-    TMP_DIR="$(mktemp -d)"
-    echo "Скачиваю Fast VPN Business в $TMP_DIR ..."
-    if command -v git >/dev/null 2>&1; then
-        git clone --depth 1 "$REPO_URL" "$TMP_DIR/fast-vpn-business" || {
-            echo "Не удалось склонировать $REPO_URL. Склонируйте репозиторий вручную и запустите install.sh из него." >&2
-            exit 1
-        }
-        exec bash "$TMP_DIR/fast-vpn-business/install.sh" "$@"
-    else
+    CLONE_DIR="/opt/fast-vpn-business"
+
+    if ! command -v git >/dev/null 2>&1; then
         echo "git не установлен. Установите git или запустите install.sh из полного клона репозитория." >&2
         exit 1
     fi
+
+    if [[ -d "$CLONE_DIR/.git" ]]; then
+        echo "Обновляю $CLONE_DIR ..."
+        git -C "$CLONE_DIR" pull --ff-only 2>&1 || echo "Не удалось обновить (нет интернета?), запускаю текущую версию."
+    else
+        echo "Скачиваю Fast VPN Business в $CLONE_DIR ..."
+        git clone --depth 1 "$REPO_URL" "$CLONE_DIR" || {
+            echo "Не удалось склонировать $REPO_URL." >&2
+            exit 1
+        }
+    fi
+    exec bash "$CLONE_DIR/install.sh" "$@"
 fi
 
 # shellcheck source=modules/common.sh
@@ -72,7 +81,10 @@ main_menu() {
                 install_bot
                 ;;
             6) require_root; cleanup_menu ;;
-            7) echo "До встречи!"; exit 0 ;;
+            7)
+                echo "До встречи! Открыть меню снова: sudo bash /opt/fast-vpn-business/install.sh"
+                exit 0
+                ;;
             *) log_warn "Некорректный выбор."; sleep 1 ;;
         esac
     done
