@@ -17,7 +17,7 @@
 На чистом сервере Ubuntu/Debian (root):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cl4wnf1sh/fast-vpn-business/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/yaceluyudevochek/fast-vpn-business/main/install.sh -o install.sh
 sudo bash install.sh
 ```
 
@@ -28,7 +28,8 @@ sudo bash install.sh
 2) Подключить этот сервер как ноду
 3) Установить Telegram-бота (white-label)
 4) Полная установка на этом сервере (панель + sub-page + бот)
-5) Выход
+5) Очистка / удаление установленного
+6) Выход
 ```
 
 Панель, ноды и бот почти всегда живут на разных серверах — установщик поэтому не "всё-в-одном-запуске", а спрашивает на каждой машине, какую роль она выполняет. Запустите `install.sh` на каждом сервере и выберите нужный пункт.
@@ -67,12 +68,67 @@ modules/
   install_panel.sh        — Remnawave Panel + Caddy + Subscription Page (bundled)
   install_node.sh          — подключение ноды
   install_bot.sh            — установка бота + мастер white-label конфигурации
+  cleanup.sh                — полное удаление панели/ноды/бота с этого сервера
 bot/                      — исходный код Telegram-бота (aiogram 3)
   handlers/                — обработчики команд/колбэков (пользователь + админ)
   services/                — Remnawave API, Platega API, webhook, напоминалка
   database/                — SQLite (тарифы, подписки, платежи, рефералы)
   config/config.py.example — шаблон конфига (реальный config.py не хранится в git)
   assets/images/            — сюда кладутся картинки экранов (опционально)
+```
+
+## Полезные команды
+
+### Сам установщик
+
+```bash
+# Первый запуск (curl | bash сам склонирует репозиторий во временный каталог)
+curl -fsSL https://raw.githubusercontent.com/yaceluyudevochek/fast-vpn-business/main/install.sh -o install.sh
+sudo bash install.sh
+
+# Повторный запуск меню из уже склонированного репозитория
+cd fast-vpn-business && sudo bash install.sh
+
+# Обновить установщик и бот до последней версии из git, затем перезапустить меню
+cd fast-vpn-business && git pull && sudo bash install.sh
+
+# Полная очистка того, что стоит на этом сервере (пункт меню 5), без диалога:
+# просто откройте install.sh и выберите нужный пункт — отдельного флага
+# для неинтерактивного вызова нет специально, чтобы нельзя было случайно
+# снести панель одной командой в скрипте автоматизации.
+```
+
+### Панель (`/opt/remnawave`)
+
+```bash
+cd /opt/remnawave
+docker compose logs -f -t                 # логи панели
+docker compose restart                    # перезапуск панели
+docker compose ps                         # статус контейнеров
+
+cd /opt/remnawave/caddy && docker compose logs -f -t   # логи Caddy / выпуска SSL
+cd /opt/remnawave/subscription && docker compose logs -f -t   # логи Subscription Page
+```
+
+### Нода (`/opt/remnanode`)
+
+```bash
+cd /opt/remnanode
+docker compose logs -f -t     # логи ноды
+docker compose restart        # перезапуск ноды
+```
+
+### Telegram-бот (systemd-сервис `fastvpnbot`)
+
+```bash
+systemctl status fastvpnbot           # статус
+journalctl -u fastvpnbot -f           # логи в реальном времени
+journalctl -u fastvpnbot -n 200       # последние 200 строк
+systemctl restart fastvpnbot          # перезапуск (например, после правки config.py)
+systemctl stop fastvpnbot             # остановить
+
+# Ручной бэкап базы данных бота
+cp /opt/fastvpnbot/bot_database.db /root/bot_database_$(date +%Y%m%d_%H%M%S).db
 ```
 
 ## Требования
@@ -88,6 +144,7 @@ bot/                      — исходный код Telegram-бота (aiogram
 - `install.sh` работает только под root и не хранит и не передаёт никуда введённые секреты — они остаются локально в `.env`/`config.py` на соответствующем сервере.
 - `config/config.py` бота никогда не коммитится (см. `.gitignore`) — используйте `config/config.py.example` как образец.
 - Node-порт по умолчанию предлагается ограничить файрволом только для IP панели.
+- Очистка (пункт меню 5) необратима: перед реальным удалением каждый шаг требует ввести слово `УДАЛИТЬ` заглавными буквами, а для бота дополнительно предлагает сохранить бэкап `config.py` и базы данных.
 
 ## Стек
 

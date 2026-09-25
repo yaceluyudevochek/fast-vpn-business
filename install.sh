@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # остальной репозиторий во временный каталог и переисполняем оттуда.
 # ---------------------------------------------------------------------------
 if [[ ! -d "$SCRIPT_DIR/modules" ]]; then
-    REPO_URL="${FASTVPN_REPO_URL:-https://github.com/cl4wnf1sh/fast-vpn-business}"
+    REPO_URL="${FASTVPN_REPO_URL:-https://github.com/yaceluyudevochek/fast-vpn-business}"
     TMP_DIR="$(mktemp -d)"
     echo "Скачиваю Fast VPN Business в $TMP_DIR ..."
     if command -v git >/dev/null 2>&1; then
@@ -42,6 +42,8 @@ source "$SCRIPT_DIR/modules/install_panel.sh"
 source "$SCRIPT_DIR/modules/install_node.sh"
 # shellcheck source=modules/install_bot.sh
 source "$SCRIPT_DIR/modules/install_bot.sh"
+# shellcheck source=modules/cleanup.sh
+source "$SCRIPT_DIR/modules/cleanup.sh"
 
 main_menu() {
     while true; do
@@ -51,7 +53,8 @@ main_menu() {
         echo "  2) Подключить этот сервер как ноду"
         echo "  3) Установить Telegram-бота (white-label)"
         echo "  4) Полная установка на этом сервере (панель + sub-page + бот)"
-        echo "  5) Выход"
+        echo "  5) Очистка / удаление установленного"
+        echo "  6) Выход"
         echo
         local choice
         read -r -p "$(echo -e "${C_BOLD}>${C_RESET} ")" choice
@@ -64,7 +67,8 @@ main_menu() {
                 install_panel
                 install_bot
                 ;;
-            5) echo "До встречи!"; exit 0 ;;
+            5) require_root; cleanup_menu ;;
+            6) echo "До встречи!"; exit 0 ;;
             *) log_warn "Некорректный выбор."; sleep 1 ;;
         esac
     done
