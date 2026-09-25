@@ -40,6 +40,8 @@ source "$SCRIPT_DIR/modules/common.sh"
 source "$SCRIPT_DIR/modules/install_panel.sh"
 # shellcheck source=modules/install_node.sh
 source "$SCRIPT_DIR/modules/install_node.sh"
+# shellcheck source=modules/install_selfsteal.sh
+source "$SCRIPT_DIR/modules/install_selfsteal.sh"
 # shellcheck source=modules/install_bot.sh
 source "$SCRIPT_DIR/modules/install_bot.sh"
 # shellcheck source=modules/cleanup.sh
@@ -51,24 +53,26 @@ main_menu() {
         echo -e "${C_BOLD}Выберите действие:${C_RESET}"
         echo "  1) Установить Remnawave Panel + Subscription Page"
         echo "  2) Подключить этот сервер как ноду"
-        echo "  3) Установить Telegram-бота (white-label)"
-        echo "  4) Полная установка на этом сервере (панель + sub-page + бот)"
-        echo "  5) Очистка / удаление установленного"
-        echo "  6) Выход"
+        echo "  3) Caddy Selfsteal (маскировка Reality для ноды)"
+        echo "  4) Установить Telegram-бота (white-label)"
+        echo "  5) Полная установка на этом сервере (панель + sub-page + бот)"
+        echo "  6) Очистка / удаление установленного"
+        echo "  7) Выход"
         echo
         local choice
         read -r -p "$(echo -e "${C_BOLD}>${C_RESET} ")" choice
         case "$choice" in
             1) require_root; detect_os; install_panel ;;
             2) require_root; detect_os; install_node ;;
-            3) require_root; detect_os; install_bot ;;
-            4)
+            3) require_root; detect_os; selfsteal_menu ;;
+            4) require_root; detect_os; install_bot ;;
+            5)
                 require_root; detect_os
                 install_panel
                 install_bot
                 ;;
-            5) require_root; cleanup_menu ;;
-            6) echo "До встречи!"; exit 0 ;;
+            6) require_root; cleanup_menu ;;
+            7) echo "До встречи!"; exit 0 ;;
             *) log_warn "Некорректный выбор."; sleep 1 ;;
         esac
     done

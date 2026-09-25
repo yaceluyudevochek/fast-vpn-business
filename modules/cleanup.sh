@@ -63,6 +63,23 @@ cleanup_node() {
     log_ok "Нода удалена."
 }
 
+cleanup_selfsteal() {
+    local caddy_dir="/opt/caddy"
+    if [[ ! -d "$caddy_dir" ]]; then
+        log_info "Caddy Selfsteal не найден в $caddy_dir — пропускаю."
+        return 0
+    fi
+
+    confirm_destructive "контейнер Caddy Selfsteal, выпущенные SSL-сертификаты и все файлы в $caddy_dir" \
+        || { log_info "Отменено."; return 0; }
+
+    log_step "Останавливаю и удаляю контейнер Caddy Selfsteal"
+    _compose_down_v "$caddy_dir"
+    rm -rf "$caddy_dir"
+
+    log_ok "Caddy Selfsteal удалён."
+}
+
 cleanup_bot() {
     local bot_dir="${1:-/opt/fastvpnbot}"
 
@@ -103,13 +120,14 @@ cleanup_bot() {
 cleanup_all() {
     log_step "Полная очистка Fast VPN Business на этом сервере"
 
-    local found_panel=0 found_node=0 found_bot=0
+    local found_panel=0 found_node=0 found_selfsteal=0 found_bot=0
     [[ -d /opt/remnawave ]] && found_panel=1
     [[ -d /opt/remnanode ]] && found_node=1
+    [[ -d /opt/caddy ]] && found_selfsteal=1
     { systemctl list-unit-files 2>/dev/null | grep -q "^fastvpnbot.service"; } || [[ -d /opt/fastvpnbot ]] && found_bot=1
 
-    if [[ "$found_panel" -eq 0 && "$found_node" -eq 0 && "$found_bot" -eq 0 ]]; then
-        log_ok "На этом сервере не найдено ни панели, ни ноды, ни бота Fast VPN Business — нечего удалять."
+    if [[ "$found_panel" -eq 0 && "$found_node" -eq 0 && "$found_selfsteal" -eq 0 && "$found_bot" -eq 0 ]]; then
+        log_ok "На этом сервере не найдено ни панели, ни ноды, ни Selfsteal, ни бота Fast VPN Business — нечего удалять."
         pause
         return 0
     fi
@@ -117,6 +135,7 @@ cleanup_all() {
     echo "Найдено на этом сервере:"
     [[ "$found_panel" -eq 1 ]] && echo "  - Remnawave Panel / Caddy / Subscription Page (/opt/remnawave)"
     [[ "$found_node" -eq 1 ]]  && echo "  - Remnawave Node (/opt/remnanode)"
+    [[ "$found_selfsteal" -eq 1 ]] && echo "  - Caddy Selfsteal (/opt/caddy)"
     [[ "$found_bot" -eq 1 ]]   && echo "  - Telegram-бот (systemd fastvpnbot)"
     echo
 
@@ -127,6 +146,7 @@ cleanup_all() {
 
     [[ "$found_panel" -eq 1 ]] && cleanup_panel
     [[ "$found_node" -eq 1 ]]  && cleanup_node
+    [[ "$found_selfsteal" -eq 1 ]] && cleanup_selfsteal
     [[ "$found_bot" -eq 1 ]]   && cleanup_bot
 
     if confirm "Также удалить сам Docker (docker-ce и все прочие контейнеры/образы на сервере)?" "n"; then
@@ -150,18 +170,20 @@ cleanup_menu() {
         echo -e "${C_BOLD}Очистка — выберите, что удалить:${C_RESET}"
         echo "  1) Только панель + Caddy + Subscription Page"
         echo "  2) Только ноду на этом сервере"
-        echo "  3) Только Telegram-бота"
-        echo "  4) Всё, что найдено на этом сервере (панель/нода/бот)"
-        echo "  5) Назад"
+        echo "  3) Только Caddy Selfsteal"
+        echo "  4) Только Telegram-бота"
+        echo "  5) Всё, что найдено на этом сервере (панель/нода/selfsteal/бот)"
+        echo "  6) Назад"
         echo
         local choice
         read -r -p "$(echo -e "${C_BOLD}>${C_RESET} ")" choice
         case "$choice" in
             1) cleanup_panel; pause ;;
             2) cleanup_node; pause ;;
-            3) cleanup_bot; pause ;;
-            4) cleanup_all ;;
-            5) return 0 ;;
+            3) cleanup_selfsteal; pause ;;
+            4) cleanup_bot; pause ;;
+            5) cleanup_all ;;
+            6) return 0 ;;
             *) log_warn "Некорректный выбор."; sleep 1 ;;
         esac
     done
