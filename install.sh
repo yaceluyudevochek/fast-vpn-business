@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+#
+# Fast VPN Business — универсальный установщик VPN-бизнеса под ключ:
+# Remnawave Panel + Subscription Page + Nodes + Telegram-бот (white-label).
+#
+# Запуск:
+#   curl -fsSL https://raw.githubusercontent.com/<org>/fast-vpn-business/main/install.sh -o install.sh
+#   sudo bash install.sh
+#
+# Или локально из клонированного репозитория:
+#   sudo bash install.sh
+#
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---------------------------------------------------------------------------
+# Если скрипт запущен через curl | bash (нет modules/ рядом) — скачиваем
+# остальной репозиторий во временный каталог и переисполняем оттуда.
+# ---------------------------------------------------------------------------
+if [[ ! -d "$SCRIPT_DIR/modules" ]]; then
+    REPO_URL="${FASTVPN_REPO_URL:-https://github.com/cl4wnf1sh/fast-vpn-business}"
+    TMP_DIR="$(mktemp -d)"
+    echo "Скачиваю Fast VPN Business в $TMP_DIR ..."
+    if command -v git >/dev/null 2>&1; then
+        git clone --depth 1 "$REPO_URL" "$TMP_DIR/fast-vpn-business" || {
+            echo "Не удалось склонировать $REPO_URL. Склонируйте репозиторий вручную и запустите install.sh из него." >&2
+            exit 1
+        }
+        exec bash "$TMP_DIR/fast-vpn-business/install.sh" "$@"
+    else
+        echo "git не установлен. Установите git или запустите install.sh из полного клона репозитория." >&2
+        exit 1
+    fi
+fi
+
+# shellcheck source=modules/common.sh
+source "$SCRIPT_DIR/modules/common.sh"
+# shellcheck source=modules/install_panel.sh
+source "$SCRIPT_DIR/modules/install_panel.sh"
+# shellcheck source=modules/install_node.sh
+source "$SCRIPT_DIR/modules/install_node.sh"
+# shellcheck source=modules/install_bot.sh
+source "$SCRIPT_DIR/modules/install_bot.sh"
+
+main_menu() {
+    while true; do
+        print_banner
+        echo -e "${C_BOLD}Выберите действие:${C_RESET}"
+        echo "  1) Установить Remnawave Panel + Subscription Page"
+        echo "  2) Подключить этот сервер как ноду"
+        echo "  3) Установить Telegram-бота (white-label)"
+        echo "  4) Полная установка на этом сервере (панель + sub-page + бот)"
+        echo "  5) Выход"
+        echo
+        local choice
+        read -r -p "$(echo -e "${C_BOLD}>${C_RESET} ")" choice
+        case "$choice" in
+            1) require_root; detect_os; install_panel ;;
+            2) require_root; detect_os; install_node ;;
+            3) require_root; detect_os; install_bot ;;
+            4)
+                require_root; detect_os
+                install_panel
+                install_bot
+                ;;
+            5) echo "До встречи!"; exit 0 ;;
+            *) log_warn "Некорректный выбор."; sleep 1 ;;
+        esac
+    done
+}
+
+main_menu

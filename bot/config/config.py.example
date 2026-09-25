@@ -1,0 +1,36 @@
+TOKEN = "your-telegram-bot-token"
+
+PANEL_API_URL = "https://your-panel-domain.example"
+# Добавляем домен для ссылок подписки
+SUB_DOMAIN_URL = "https://your-sub-domain.example"
+
+ADMIN_ID = 0
+
+PANEL_API_KEY = "your-remnawave-api-key"
+
+# ======================================================
+# Platega.io (Платежная система)
+# ======================================================
+
+# Данные из личного кабинета Platega.io
+PLATEGA_MERCHANT_ID = "your-merchant-uuid"
+PLATEGA_SECRET_KEY = "your-platega-secret-key"
+
+# URL для API
+PLATEGA_API_URL = "https://app.platega.io"
+
+# URL для callback'ов (на ваш сервер)
+PLATEGA_WEBHOOK_URL = "https://your-panel-domain.example/webhook/platega"
+
+# Куда перенаправлять пользователя после оплаты
+PLATEGA_SUCCESS_URL = "https://t.me/your_bot"
+PLATEGA_FAILED_URL = "https://t.me/your_bot"
+
+# Настройки веб-сервера для приема callback'ов
+WEBHOOK_HOST = "0.0.0.0"  # Слушаем все интерфейсы
+WEBHOOK_PORT = 8080       # Порт для веб-сервера (не конфликтует с панелью)
+
+
+AGREEMENT_URL = "https://telegra.ph/your-agreement"
+PRIVACY_URL = "https://telegra.ph/your-privacy-policy"
+SUPPORT_URL = "https://t.me/your_support"

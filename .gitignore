@@ -1,0 +1,20 @@
+# Bot runtime artifacts — никогда не коммитим реальные секреты и данные
+bot/config/config.py
+bot/**/__pycache__/
+bot/venv/
+bot/venv_test/
+bot/*.db
+bot/*.db.*
+bot/*.log
+
+# Пользовательские картинки экранов (кладутся при установке, не часть репозитория)
+bot/assets/images/*.png
+bot/assets/images/*.jpg
+bot/assets/images/*.jpeg
+!bot/assets/images/README.md
+
+# ОС/IDE
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
