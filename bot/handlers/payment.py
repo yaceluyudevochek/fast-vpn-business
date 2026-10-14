@@ -7,6 +7,7 @@ from datetime import datetime
 
 from database import db
 from services.platega_api import PlategaAPI
+from services.payment_webhook import activate_transaction
 from config.config import (
     PLATEGA_MERCHANT_ID,
     PLATEGA_SECRET_KEY,
@@ -331,7 +332,11 @@ async def check_payment(callback: CallbackQuery):
         return
 
     if transaction['status'] == 'CONFIRMED':
-        # Платеж уже подтвержден
+        # Платеж подтвержден; если подписка по какой-то причине ещё не
+        # активирована (например, webhook не дошёл) — активируем её сейчас
+        if not transaction.get('activated_at'):
+            await activate_transaction(transaction)
+
         plan = await db.get_tariff_plan(transaction['plan_id'])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -359,8 +364,9 @@ async def check_payment(callback: CallbackQuery):
                 # Обновляем статус в БД
                 await db.update_transaction_status(transaction_id, 'CONFIRMED')
 
-                # Здесь можно вызвать handle_successful_payment, но лучше дождаться callback'а
-                # Просто уведомляем пользователя
+                # Активируем подписку сразу. Если следом придёт webhook Platega,
+                # activate_transaction не даст активировать эту же транзакцию дважды.
+                await activate_transaction(transaction)
 
                 await show_screen(
                     callback,

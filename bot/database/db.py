@@ -96,6 +96,22 @@ async def init_db():
                     )
                 """)
 
+        # Миграция: отдельный учёт того, что подписка по транзакции реально
+        # активирована (статус CONFIRMED сам по себе этого не гарантирует —
+        # его может выставить и проверка оплаты кнопкой в боте).
+        async with db.execute("PRAGMA table_info(payment_transactions)") as cursor:
+            payment_columns = {row[1] for row in await cursor.fetchall()}
+        if "activated_at" not in payment_columns:
+            await db.execute("ALTER TABLE payment_transactions ADD COLUMN activated_at TIMESTAMP")
+            await db.execute("ALTER TABLE payment_transactions ADD COLUMN activation_claimed_at TIMESTAMP")
+            # Все платежи, подтверждённые до миграции, считаем уже обработанными,
+            # чтобы повторный callback по старой транзакции не продлил подписку ещё раз
+            await db.execute("""
+                UPDATE payment_transactions
+                SET activated_at = COALESCE(confirmed_at, updated_at, CURRENT_TIMESTAMP)
+                WHERE status = 'CONFIRMED'
+            """)
+
         await db.commit()
         await create_default_tariffs(db)
         logger.info("✅ База данных инициализирована")
@@ -615,6 +631,47 @@ async def update_transaction_status(transaction_id: str, status: str):
                 WHERE transaction_id = ?
             """, (transaction_id,))
 
+        await db.commit()
+
+
+async def claim_activation(transaction_id: str) -> bool:
+    """
+    Атомарно "занять" активацию транзакции. True — активировать должен именно
+    этот вызов; False — уже активирована либо активируется другим вызовом.
+    Зависший claim (старше 10 минут, например после падения бота) перехватывается.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            UPDATE payment_transactions
+            SET activation_claimed_at = CURRENT_TIMESTAMP
+            WHERE transaction_id = ?
+              AND activated_at IS NULL
+              AND (activation_claimed_at IS NULL
+                   OR activation_claimed_at < datetime('now', '-10 minutes'))
+        """, (transaction_id,))
+        await db.commit()
+        return cursor.rowcount == 1
+
+
+async def mark_activated(transaction_id: str):
+    """Отметить, что подписка по транзакции успешно активирована"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE payment_transactions
+            SET activated_at = CURRENT_TIMESTAMP
+            WHERE transaction_id = ?
+        """, (transaction_id,))
+        await db.commit()
+
+
+async def release_activation_claim(transaction_id: str):
+    """Снять claim после неудачной активации, чтобы её можно было повторить"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE payment_transactions
+            SET activation_claimed_at = NULL
+            WHERE transaction_id = ? AND activated_at IS NULL
+        """, (transaction_id,))
         await db.commit()
 
 

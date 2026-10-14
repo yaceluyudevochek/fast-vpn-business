@@ -72,24 +72,14 @@ async def handle_platega_callback(request):
                 logger.error(f"❌ Транзакция не найдена: {transaction_id}")
                 return web.Response(status=404, text="Transaction not found")
 
-        # Платежные шлюзы (в т.ч. Platega) могут прислать один и тот же callback
-        # несколько раз (retry при задержке ответа, сетевые сбои и т.п.).
-        # Запоминаем, была ли транзакция уже подтверждена ДО этого запроса,
-        # чтобы не активировать/продлевать подписку повторно по дублю.
-        already_confirmed = transaction.get('status') == 'CONFIRMED'
-
         # Обновляем статус в БД
         await db.update_transaction_status(transaction_id, status)
 
-        # Если статус CONFIRMED - активируем подписку (но не повторно для дублей)
+        # Если статус CONFIRMED - активируем подписку. Повторные callback'и и
+        # одновременная проверка оплаты кнопкой в боте не приведут к двойному
+        # продлению: activate_transaction активирует каждую транзакцию ровно раз.
         if status == "CONFIRMED":
-            if already_confirmed:
-                logger.warning(
-                    f"⚠️ Дублирующийся callback для уже подтверждённой транзакции "
-                    f"{transaction_id}, повторная активация пропущена"
-                )
-            else:
-                await handle_successful_payment(transaction)
+            await activate_transaction(transaction)
         elif status == "CANCELED":
             await handle_failed_payment(transaction)
         elif status == "CHARGEBACKED":
@@ -103,11 +93,47 @@ async def handle_platega_callback(request):
         return web.Response(status=500, text="Internal Server Error")
 
 
-# В payment_webhook.py
+async def activate_transaction(transaction) -> bool:
+    """
+    Активировать подписку по подтверждённой транзакции ровно один раз.
 
-async def handle_successful_payment(transaction):
-    """Обработка успешного платежа"""
+    Вызывается и из webhook'а Platega, и из кнопки «Проверить оплату» — кто
+    первым забрал "claim" в БД, тот и активирует; остальные вызовы (дубли
+    callback'а, гонка между кнопкой и webhook'ом) пропускаются. Если активация
+    не удалась, claim снимается и следующий callback/проверка попробуют снова.
+    """
+    transaction_id = transaction['transaction_id']
+
+    if not await db.claim_activation(transaction_id):
+        logger.warning(
+            f"⚠️ Транзакция {transaction_id} уже активирована или активируется "
+            f"прямо сейчас — повторная активация пропущена"
+        )
+        return False
+
+    activated = False
+    try:
+        activated = await handle_successful_payment(transaction)
+    finally:
+        if activated:
+            await db.mark_activated(transaction_id)
+        else:
+            await db.release_activation_claim(transaction_id)
+            logger.error(f"❌ Активация транзакции {transaction_id} не удалась, claim снят")
+            await notify_admin_error(
+                transaction['telegram_id'],
+                f"Платёж {transaction_id} подтверждён, но подписка не активирована. "
+                f"Активация будет повторена при следующем callback'е/проверке оплаты."
+            )
+
+    return activated
+
+
+async def handle_successful_payment(transaction) -> bool:
+    """Обработка успешного платежа. Возвращает True, если подписка реально обновлена."""
     logger.info(f"💰 Успешный платеж для транзакции {transaction['transaction_id']}")
+
+    activated = False
 
     try:
         # Парсим payload
@@ -121,7 +147,7 @@ async def handle_successful_payment(transaction):
         plan = await db.get_tariff_plan(plan_id)
         if not plan:
             logger.error(f"❌ План {plan_id} не найден")
-            return
+            return False
 
         # Определяем, лимитный это тариф или безлимитный
         is_unlimited = (plan['traffic_limit_bytes'] == 0)
@@ -160,6 +186,8 @@ async def handle_successful_payment(transaction):
                 )
 
                 if new_expiry:
+                    # Дни уже добавлены в панели — с этого момента повторять нельзя
+                    activated = True
                     await db.update_subscription_expiry(existing_sub['id'], new_expiry)
 
                     # Если подписка была неактивна, активируем
@@ -196,7 +224,7 @@ async def handle_successful_payment(transaction):
                 user_data = await panel_api.get_user_by_username(existing_sub['username_in_panel'])
                 if not user_data:
                     logger.error(f"❌ Не удалось получить данные пользователя из панели")
-                    return
+                    return False
 
                 # Обновляем пользователя в панели: устанавливаем новую дату и лимит
                 update_payload = {
@@ -211,6 +239,7 @@ async def handle_successful_payment(transaction):
                 response = await panel_api._request("PATCH", "users", json=update_payload)
 
                 if response and not response.get("error"):
+                    activated = True
                     # УСПЕШНО: теперь сбрасываем счетчик трафика
                     logger.info(f"🔄 Сбрасываем счетчик трафика для пользователя {user_id}")
                     reset_success = await panel_api.reset_user_traffic(existing_sub['username_in_panel'])
@@ -298,6 +327,8 @@ async def handle_successful_payment(transaction):
                     # Сбрасываем трафик
                     await panel_api.reset_user_traffic(username_in_panel)
 
+                activated = bool(new_expiry)
+
                 # Создаем запись в БД
                 short_uuid = existing.get('shortUuid')
                 subscription_id = await db.create_subscription(
@@ -322,6 +353,7 @@ async def handle_successful_payment(transaction):
                 )
 
                 if new_user:
+                    activated = True
                     short_uuid = new_user.get("shortUuid")
                     expiry = new_user.get("expireAt")
 
@@ -341,7 +373,7 @@ async def handle_successful_payment(transaction):
                     )
                 else:
                     logger.error(f"❌ Ошибка создания пользователя в панели для {user_id}")
-                    return
+                    return False
 
             # Отправляем уведомление
             await notify_user_success(
@@ -355,6 +387,8 @@ async def handle_successful_payment(transaction):
 
     except Exception as e:
         logger.error(f"❌ Ошибка при активации подписки: {e}", exc_info=True)
+
+    return activated
 
 
 async def handle_failed_payment(transaction):
