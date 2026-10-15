@@ -5,6 +5,7 @@ import hashlib
 from datetime import datetime, timedelta
 
 from database import db
+from database import promo_db
 from services.panel_api import PanelAPI
 from config.config import (
     PLATEGA_MERCHANT_ID,
@@ -72,6 +73,21 @@ async def handle_platega_callback(request):
                 logger.error(f"❌ Транзакция не найдена: {transaction_id}")
                 return web.Response(status=404, text="Transaction not found")
 
+        # Сумма в callback должна совпадать с суммой счёта (она может быть со скидкой по промокоду).
+        # Пока только предупреждаем админа, не блокируя активацию: формат суммы для
+        # криптоплатежей не подтверждён, ложное срабатывание не должно лишать клиента подписки.
+        if status == "CONFIRMED" and amount is not None and currency == transaction.get('currency'):
+            if abs(float(amount) - float(transaction['amount'])) > 0.5:
+                logger.error(
+                    f"⚠️ Сумма в callback ({amount} {currency}) не совпадает с суммой счёта "
+                    f"({transaction['amount']}) для транзакции {transaction_id}"
+                )
+                await notify_admin_error(
+                    transaction['telegram_id'],
+                    f"Сумма оплаты {amount} {currency} не совпадает с суммой счёта "
+                    f"{transaction['amount']} (транзакция {transaction_id})"
+                )
+
         # Обновляем статус в БД
         await db.update_transaction_status(transaction_id, status)
 
@@ -117,6 +133,11 @@ async def activate_transaction(transaction) -> bool:
     finally:
         if activated:
             await db.mark_activated(transaction_id)
+            # Промокод считается применённым только после оплаты и активации подписки
+            try:
+                await promo_db.record_redemption(transaction)
+            except Exception as e:
+                logger.error(f"❌ Не удалось записать применение промокода по транзакции {transaction_id}: {e}")
         else:
             await db.release_activation_claim(transaction_id)
             logger.error(f"❌ Активация транзакции {transaction_id} не удалась, claim снят")

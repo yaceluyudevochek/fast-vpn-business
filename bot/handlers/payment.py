@@ -16,6 +16,7 @@ from config.config import (
     PLATEGA_FAILED_URL
 )
 from handlers.ui_screens import show_screen
+from handlers.promo_view import promo_check_for_state, saved_promo_code
 from handlers.ui_emoji import E, kb_button
 
 logger = logging.getLogger(__name__)
@@ -75,9 +76,20 @@ async def choose_payment_method(callback: CallbackQuery, state: FSMContext):
 
     traffic_text = "безлимит" if is_unlimited else f"{plan['traffic_limit_bytes'] / (1024 ** 3):.0f} GB"
 
+    promo_check = await promo_check_for_state(state, user_id, plan)
+    promo_code = await saved_promo_code(state)
+
     # Формируем текст с предупреждением
     text = f"{E['money']} <b>{plan['tariff_name']}</b>\n\n"
-    text += f"Сумма к оплате: <b>{plan['price']} руб.</b>\n"
+    if promo_check is not None and promo_check.ok:
+        text += (
+            f"Сумма к оплате: <s>{promo_check.original_price} руб.</s> → <b>{promo_check.final_price} руб.</b>\n"
+            f"{E['tag']} Промокод: <b>{promo_check.promo['code']}</b> (−{promo_check.promo['discount_percent']}%)\n"
+        )
+    else:
+        text += f"Сумма к оплате: <b>{plan['price']} руб.</b>\n"
+        if promo_check is not None:
+            text += f"{E['warn']} Промокод {promo_code}: {promo_check.message}\n"
     text += f"{E['calendar']} Срок: <b>{plan['days']} дней</b>\n"
     text += f"{E['chart']} Трафик: <b>{traffic_text}</b>\n\n"
 
@@ -122,6 +134,15 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ План не найден", show_alert=True)
         await state.clear()
         return
+
+    # Промокод проверяем заново: он мог истечь или исчерпаться, пока пользователь выбирал способ оплаты
+    promo_check = await promo_check_for_state(state, user_id, plan)
+    if promo_check is not None and not promo_check.ok:
+        await callback.answer(f"Промокод больше не действует: {promo_check.message}. Убери его и повтори.", show_alert=True)
+        return
+    amount = promo_check.final_price if promo_check is not None else plan['price']
+    promo_id = promo_check.promo['id'] if promo_check is not None else None
+    discount_note = f" (скидка по промокоду {plan['price'] - amount} руб.)" if promo_id else ""
 
     await callback.answer("⏳ Создаю платеж...")
 
@@ -175,7 +196,7 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
     # СОЗДАЕМ ПЛАТЕЖ В PLATEGA.IO
     # ==========================================================
     payment_data = await platega_api.create_payment(
-        amount=plan['price'],
+        amount=amount,
         description=description,
         payload=payload,
         payment_method=payment_method,
@@ -192,8 +213,10 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
             transaction_id=transaction_id,
             telegram_id=user_id,
             plan_id=plan_id,
-            amount=plan['price'],
-            payment_method=payment_method
+            amount=amount,
+            payment_method=payment_method,
+            promo_id=promo_id,
+            original_amount=plan['price'] if promo_id else None
         )
 
         # Отправляем пользователю ссылку на оплату
@@ -210,7 +233,7 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
             "payment",
             f"{E['check']} <b>Счёт на оплату создан!</b>\n\n"
             f"{E['diamond']} Тариф: <b>{plan['tariff_name']}</b>\n"
-            f"{E['money']} Сумма: <b>{plan['price']} руб.</b>\n"
+            f"{E['money']} Сумма: <b>{amount} руб.</b>{discount_note}\n"
             f"{E['calendar']} Срок: <b>{plan['days']} дней</b>\n"
             f"{E['chart']} Трафик: <b>{traffic_text}</b>\n"
             f"{E['clock']} Счёт действителен: <b>{expires_in}</b>\n\n"

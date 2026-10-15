@@ -147,10 +147,65 @@ async def _m003_trial_nudge(db):
     await _add_column(db, "subscriptions", "trial_nudge_status", "TEXT")
 
 
+async def _m004_promo_codes(db):
+    """Промокоды: коды, область действия, применения (по факту оплаты) и события для воронки"""
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS promo_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            kind TEXT NOT NULL DEFAULT 'regular',        -- regular | ad (рекламный, с учётом партнёра)
+            title TEXT,
+            discount_percent INTEGER NOT NULL DEFAULT 0,
+            max_activations INTEGER,                      -- NULL = без лимита
+            valid_until TEXT,                             -- ISO UTC, NULL = бессрочно
+            first_payment_only INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            partner_name TEXT,
+            commission_percent REAL,
+            created_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # Пустая область действия = все планы
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS promo_scope (
+            promo_id INTEGER NOT NULL,
+            plan_id INTEGER NOT NULL,
+            PRIMARY KEY (promo_id, plan_id)
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS promo_redemptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            promo_id INTEGER NOT NULL,
+            telegram_id INTEGER NOT NULL,
+            transaction_id TEXT NOT NULL UNIQUE,
+            plan_id INTEGER,
+            original_amount INTEGER NOT NULL,
+            paid_amount INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_promo_redemptions_promo ON promo_redemptions(promo_id)")
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS promo_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            promo_id INTEGER NOT NULL,
+            telegram_id INTEGER NOT NULL,
+            event TEXT NOT NULL,                          -- link | applied
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_promo_events_promo ON promo_events(promo_id, event)")
+    await _add_column(db, "payment_transactions", "promo_id", "INTEGER")
+    await _add_column(db, "payment_transactions", "original_amount", "INTEGER")
+
+
 _MIGRATIONS = [
     (1, _m001_payment_activation),
     (2, _m002_tariff_full_description),
     (3, _m003_trial_nudge),
+    (4, _m004_promo_codes),
 ]
 
 
@@ -720,17 +775,21 @@ async def create_payment_transaction(
         plan_id: int,
         amount: int,
         payment_method: int,
-        currency: str = "RUB"
+        currency: str = "RUB",
+        promo_id: Optional[int] = None,
+        original_amount: Optional[int] = None
 ) -> int:
-    """Создать запись о транзакции"""
+    """Создать запись о транзакции (amount — фактическая сумма к оплате, уже со скидкой по промокоду)"""
     payload = f"{telegram_id}_{plan_id}_{int(datetime.now().timestamp())}"
 
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
-            INSERT INTO payment_transactions 
-            (transaction_id, telegram_id, plan_id, amount, currency, payment_method, payload, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')
-        """, (transaction_id, telegram_id, plan_id, amount, currency, payment_method, payload))
+            INSERT INTO payment_transactions
+            (transaction_id, telegram_id, plan_id, amount, currency, payment_method, payload, status,
+             promo_id, original_amount)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+        """, (transaction_id, telegram_id, plan_id, amount, currency, payment_method, payload,
+              promo_id, original_amount))
 
         await db.commit()
         return cursor.lastrowid

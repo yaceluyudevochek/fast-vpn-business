@@ -19,6 +19,8 @@ from services.platega_api import PlategaAPI
 from services.payment_webhook import init_webhook, handle_platega_callback
 from services.reminder import SubscriptionReminder
 from handlers import backup  # Импортируем новый модуль
+from handlers.promo import router as promo_router
+from handlers.admin_promo import router as admin_promo_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -52,6 +54,8 @@ async def main():
 
     # Регистрация роутеров
     dp.include_router(admin.router)
+    dp.include_router(promo_router)
+    dp.include_router(admin_promo_router)
     dp.include_router(handlers.router)
     dp.include_router(payment_router)  # Новый роутер для платежей
 

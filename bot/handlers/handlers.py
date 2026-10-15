@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.filters import CommandObject
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import logging
 from datetime import datetime, timedelta
@@ -8,9 +9,12 @@ from datetime import datetime, timedelta
 from services.panel_api import PanelAPI
 from config.config import PANEL_API_URL, PANEL_API_KEY
 from database import db as database
+from database import promo_db
+from services.promo import normalize_code
 from handlers.payment import router as payment_router
 from handlers.ui_screens import show_screen
 from handlers.ui_emoji import E, BTN, kb_button
+from handlers.promo_view import price_lines, promo_check_for_state, promo_row, saved_promo_code
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -93,9 +97,12 @@ async def show_info_menu(callback: CallbackQuery):
 # ==========================================================
 
 @router.message(Command("start"))
-async def start_cmd(message: Message, command: CommandObject):
+async def start_cmd(message: Message, command: CommandObject, state: FSMContext):
     user = message.from_user
     referred_by = None
+
+    # Если пользователь застрял на вводе промокода — выходим из этого режима (данные диалога остаются)
+    await state.set_state(None)
 
     if command.args and command.args.startswith("ref_"):
         ref_code = command.args[4:]
@@ -107,6 +114,18 @@ async def start_cmd(message: Message, command: CommandObject):
     await database.add_user(user.id, user.username, referred_by)
 
     await render_main_menu(message, user.id, user.first_name)
+
+    # Ссылка с промокодом (t.me/бот?start=promo_КОД): запоминаем код, он применится при оплате
+    if command.args and command.args.startswith("promo_"):
+        promo = await promo_db.get_promo_by_code(normalize_code(command.args[len("promo_"):]))
+        if promo and promo["is_active"]:
+            await state.update_data(promo_code=promo["code"])
+            await promo_db.record_event(promo["id"], user.id, "link")
+            await message.answer(
+                f"{E['tag']} Промокод <b>{promo['code']}</b> сохранён. "
+                f"Скидка {promo['discount_percent']}% применится при выборе подходящего тарифа.",
+                parse_mode="HTML"
+            )
 
 
 # ==========================================================
@@ -181,21 +200,23 @@ async def show_plans_for_type(callback: CallbackQuery):
 # ==========================================================
 
 @router.callback_query(F.data.startswith("select_plan_"))
-async def select_plan(callback: CallbackQuery):
-    """Выбор плана - перенаправляем на оплату"""
+async def select_plan(callback: CallbackQuery, state: FSMContext):
+    """Выбор плана - показываем сводку и кнопку оплаты"""
     plan_id = int(callback.data.split("_")[2])
+    error = await render_select_plan(callback, callback.from_user.id, plan_id, state)
+    await callback.answer(error or None, show_alert=bool(error))
 
-    # Получаем информацию о плане для отображения
+
+async def render_select_plan(target, user_id: int, plan_id: int, state: FSMContext):
+    """Экран выбранного плана (покупка). Возвращает текст ошибки, если показать не удалось."""
     plan = await database.get_tariff_plan(plan_id)
     if not plan:
-        await callback.answer("❌ План не найден", show_alert=True)
-        return
+        return "❌ План не найден"
 
     # Определяем, лимитный это тариф или безлимитный
     is_unlimited = (plan['traffic_limit_bytes'] == 0)
 
     # Проверяем, есть ли уже активная подписка этого типа
-    user_id = callback.from_user.id
     subscriptions = await database.get_user_subscriptions(user_id)
     existing_sub = None
     for sub in subscriptions:
@@ -203,8 +224,12 @@ async def select_plan(callback: CallbackQuery):
             existing_sub = sub
             break
 
+    promo_code = await saved_promo_code(state)
+    promo_check = await promo_check_for_state(state, user_id, plan)
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [kb_button("pay", "Оплатить", callback_data=f"pay_plan_{plan_id}")],
+        promo_row(plan_id, 0, promo_check),
         [kb_button("back", "Назад к планам", callback_data=f"select_type_{plan['tariff_type_id']}")]
     ])
 
@@ -213,7 +238,7 @@ async def select_plan(callback: CallbackQuery):
     text_parts = [
         f"{E['diamond']} <b>{plan['tariff_name']}</b>\n\n",
         f"{E['calendar']} Срок: <b>{plan['days']} дней</b>\n",
-        f"{E['money']} Цена: <b>{plan['price']} руб.</b>\n",
+        price_lines(plan, promo_check, promo_code),
         f"{E['chart']} Лимит трафика: <b>{traffic_text}</b>\n",
         f"{E['shield']} Лимит устройств: <b>{plan['hwid_limit']}</b>\n\n"
     ]
@@ -231,8 +256,8 @@ async def select_plan(callback: CallbackQuery):
 
     text += f"Для оформления нажми «Оплатить» {E['sparkle']}"
 
-    await show_screen(callback, "payment", text, keyboard)
-    await callback.answer()
+    await show_screen(target, "payment", text, keyboard)
+    return None
 
 
 @router.callback_query(F.data.startswith("renew_type_"))
@@ -775,7 +800,7 @@ async def view_subscription(callback: CallbackQuery):
 # ==========================================================
 
 @router.callback_query(F.data.startswith("renew_plan_"))
-async def renew_plan(callback: CallbackQuery):
+async def renew_plan(callback: CallbackQuery, state: FSMContext):
     """Обработка выбора плана для продления"""
     try:
         # Формат: renew_plan_{plan_id}_{subscription_id}
@@ -786,22 +811,28 @@ async def renew_plan(callback: CallbackQuery):
         await callback.answer("❌ Ошибка в данных", show_alert=True)
         return
 
+    error = await render_renew_plan(callback, callback.from_user.id, plan_id, subscription_id, state)
+    await callback.answer(error or None, show_alert=bool(error))
+
+
+async def render_renew_plan(target, user_id: int, plan_id: int, subscription_id: int, state: FSMContext):
+    """Экран выбранного плана для продления. Возвращает текст ошибки, если показать не удалось."""
     # Получаем информацию о плане
     plan = await database.get_tariff_plan(plan_id)
     if not plan:
-        await callback.answer("❌ План не найден", show_alert=True)
-        return
+        return "❌ План не найден"
 
     # Получаем информацию о подписке
     subscription = await database.get_subscription(subscription_id)
     if not subscription:
-        await callback.answer("❌ Подписка не найдена", show_alert=True)
-        return
+        return "❌ Подписка не найдена"
 
     # Проверяем, принадлежит ли подписка пользователю
-    if subscription['telegram_id'] != callback.from_user.id:
-        await callback.answer("❌ Это не ваша подписка", show_alert=True)
-        return
+    if subscription['telegram_id'] != user_id:
+        return "❌ Это не ваша подписка"
+
+    promo_code = await saved_promo_code(state)
+    promo_check = await promo_check_for_state(state, user_id, plan)
 
     # Получаем актуальную информацию из API для отображения даты
     info = await panel_api.format_subscription_info_by_short_uuid(subscription['short_uuid'])
@@ -828,7 +859,7 @@ async def renew_plan(callback: CallbackQuery):
         f"{E['diamond']} <b>Продление подписки</b>\n\n",
         f"{E['diamond']} Тариф: <b>{plan['tariff_name']}</b>\n",
         f"{E['calendar']} Срок: <b>{plan['days']} дней</b>\n",
-        f"{E['money']} Цена: <b>{plan['price']} руб.</b>\n",
+        price_lines(plan, promo_check, promo_code),
         f"{E['chart']} Лимит трафика: <b>{'безлимит' if is_unlimited else f'{traffic_gb} GB'}</b>\n\n"
     ]
 
@@ -846,11 +877,12 @@ async def renew_plan(callback: CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [kb_button("confirm", "Подтвердить", callback_data=f"pay_plan_{plan_id}")],
+        promo_row(plan_id, subscription_id, promo_check),
         [kb_button("back", "Назад к выбору планов", callback_data=f"renew_type_{plan['tariff_type_id']}_{subscription_id}")]
     ])
 
-    await show_screen(callback, "payment", text, keyboard)
-    await callback.answer()
+    await show_screen(target, "payment", text, keyboard)
+    return None
 
 
 # ==========================================================
