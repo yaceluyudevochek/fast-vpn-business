@@ -10,10 +10,17 @@ from handlers.ui_emoji import E
 
 logger = logging.getLogger(__name__)
 
+# Напоминание триальщику, который так и не подключился: через сколько часов
+# после активации проверять и какой расход трафика считать "не пользуется"
+TRIAL_NUDGE_AFTER_HOURS = 2
+TRIAL_NUDGE_WINDOW_HOURS = 48
+TRIAL_NUDGE_MIN_BYTES = 50 * 1024 * 1024
+
 
 class SubscriptionReminder:
-    def __init__(self, bot: Bot, check_interval: int = 3600):
+    def __init__(self, bot: Bot, check_interval: int = 3600, panel_api=None):
         self.bot = bot
+        self.panel_api = panel_api
         self.check_interval = check_interval
         self.is_running = False
         self._task: Optional[asyncio.Task] = None
@@ -44,7 +51,77 @@ class SubscriptionReminder:
                 await self._check_all_subscriptions()
             except Exception as e:
                 logger.error(f"Error in subscription check loop: {e}", exc_info=True)
+            try:
+                await self._check_trial_nudges()
+            except Exception as e:
+                logger.error(f"Error in trial nudge check: {e}", exc_info=True)
             await asyncio.sleep(self.check_interval)
+
+    async def _check_trial_nudges(self):
+        """
+        Триальщикам, которые активировали пробный период, но почти не потратили
+        трафик (< 50 МБ), один раз отправляем подсказку, как подключиться.
+        Состояние хранится в БД (subscriptions.trial_nudge_status), поэтому
+        перезапуск бота ничего не продублирует.
+        """
+        if self.panel_api is None:
+            return
+
+        candidates = await db.get_trial_nudge_candidates(
+            TRIAL_NUDGE_AFTER_HOURS, TRIAL_NUDGE_WINDOW_HOURS
+        )
+        for sub in candidates:
+            try:
+                expiry = sub.get("subscription_expiry")
+                if expiry and datetime.fromisoformat(expiry.replace("Z", "+00:00")) <= datetime.now().astimezone():
+                    await db.set_trial_nudge_status(sub["id"], "connected")  # триал уже закончился
+                    continue
+
+                used = await self.panel_api.get_used_traffic_bytes(sub["username_in_panel"])
+                if used is None:
+                    continue  # панель не ответила — попробуем на следующем проходе
+
+                if used >= TRIAL_NUDGE_MIN_BYTES:
+                    await db.set_trial_nudge_status(sub["id"], "connected")
+                    continue
+
+                if await self._send_trial_nudge(sub["telegram_id"]):
+                    await db.set_trial_nudge_status(sub["id"], "sent")
+                    logger.info(
+                        f"📨 Напоминание триальщику {sub['telegram_id']} отправлено "
+                        f"(использовано {used / 1024 / 1024:.1f} МБ)"
+                    )
+            except Exception as e:
+                logger.error(f"Trial nudge failed for subscription {sub.get('id')}: {e}")
+            await asyncio.sleep(0.05)
+
+    async def _send_trial_nudge(self, telegram_id: int) -> bool:
+        """Отправить подсказку. True — обработано (отправлено или получатель недоступен)."""
+        from aiogram.types import InlineKeyboardMarkup
+        from handlers.ui_emoji import kb_button
+        from config.config import SUPPORT_URL
+
+        text = (
+            f"{E['info']} <b>Пробный период идёт, а подключения пока нет</b>\n\n"
+            "Подключиться можно за минуту:\n\n"
+            "<b>1.</b> Открой «Мои подписки» и скопируй ссылку\n"
+            "<b>2.</b> Установи приложение <b>Happ</b> (iOS, Android, ПК)\n"
+            "<b>3.</b> Вставь ссылку в приложение и нажми «Подключиться»\n\n"
+            "Если что-то не получается — напиши в поддержку, поможем."
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [kb_button("subs", "Мои подписки", callback_data="my_subscriptions")],
+            [kb_button("chat", "Поддержка", url=SUPPORT_URL)],
+        ])
+        try:
+            await self.bot.send_message(telegram_id, text, parse_mode="HTML", reply_markup=keyboard)
+            return True
+        except Exception as e:
+            message = str(e).lower()
+            if any(s in message for s in ("blocked", "deactivated", "chat not found", "user not found")):
+                return True  # писать некому — повторять нет смысла
+            logger.warning(f"Не удалось отправить напоминание триальщику {telegram_id}: {e}")
+            return False
 
     async def _check_all_subscriptions(self):
         """Проверка всех подписок"""

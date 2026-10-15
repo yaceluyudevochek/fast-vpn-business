@@ -212,6 +212,7 @@ async def admin_edit_type(callback: CallbackQuery):
         f"Squad ID: {tariff_type['squad_id']}\n"
         f"Лимит устройств: {tariff_type['hwid_limit']}\n"
         f"Описание: {tariff_type['description'] or 'нет'}\n"
+        f"Полное описание: {'есть' if tariff_type.get('full_description') else 'нет'}\n"
         f"Статус: {'✅ Активен' if tariff_type['is_active'] else '❌ Неактивен'}\n\n"
         f"Что хотите изменить?"
     )
@@ -221,6 +222,7 @@ async def admin_edit_type(callback: CallbackQuery):
         [InlineKeyboardButton(text="🆔 Squad ID", callback_data=f"edit_type_field_{type_id}_squad_id")],
         [InlineKeyboardButton(text="📱 Лимит устройств", callback_data=f"edit_type_field_{type_id}_hwid_limit")],
         [InlineKeyboardButton(text="📄 Описание", callback_data=f"edit_type_field_{type_id}_description")],
+        [InlineKeyboardButton(text="📋 Полное описание", callback_data=f"edit_type_field_{type_id}_full_description")],
         [InlineKeyboardButton(
             text="🔄 Переключить статус",
             callback_data=f"toggle_type_{type_id}"
@@ -268,7 +270,8 @@ async def edit_type_field(callback: CallbackQuery, state: FSMContext):
         "name": "название",
         "squad_id": "Squad ID",
         "hwid_limit": "лимит устройств",
-        "description": "описание"
+        "description": "короткое описание (для кнопки, до ~40 символов)",
+        "full_description": "полное описание (можно с форматированием, «-» — очистить)"
     }
 
     if field not in field_names:
@@ -333,6 +336,7 @@ async def toggle_type_status(callback: CallbackQuery):
             f"Squad ID: {updated_type['squad_id']}\n"
             f"Лимит устройств: {updated_type['hwid_limit']}\n"
             f"Описание: {updated_type['description'] or 'нет'}\n"
+            f"Полное описание: {'есть' if updated_type.get('full_description') else 'нет'}\n"
             f"Статус: {'✅ Активен' if updated_type['is_active'] else '❌ Неактивен'}\n\n"
             f"Что хотите изменить?"
         )
@@ -342,6 +346,7 @@ async def toggle_type_status(callback: CallbackQuery):
             [InlineKeyboardButton(text="🆔 Squad ID", callback_data=f"edit_type_field_{type_id}_squad_id")],
             [InlineKeyboardButton(text="📱 Лимит устройств", callback_data=f"edit_type_field_{type_id}_hwid_limit")],
             [InlineKeyboardButton(text="📄 Описание", callback_data=f"edit_type_field_{type_id}_description")],
+            [InlineKeyboardButton(text="📋 Полное описание", callback_data=f"edit_type_field_{type_id}_full_description")],
             [InlineKeyboardButton(
                 text="🔄 Переключить статус",
                 callback_data=f"toggle_type_{type_id}"
@@ -694,6 +699,16 @@ async def process_field_edit(message: Message, state: FSMContext):
     entity_id = data.get('entity_id')
     field = data.get('field')
     value = message.text.strip()
+    if field == 'full_description':
+        # В подписи к картинке Telegram разрешает не более 1024 символов,
+        # часть из них занимает остальной текст экрана
+        if len(value) > 700:
+            await message.answer(
+                f"❌ Слишком длинное описание ({len(value)} симв.). Максимум — 700. Сократите и отправьте снова."
+            )
+            return
+        # сохраняем форматирование (жирный, курсив) как безопасный HTML
+        value = None if value == '-' else (message.html_text or value).strip()
 
     if not all([entity_type, entity_id, field]):
         await message.answer("❌ Ошибка: данные не найдены. Начните заново.")
@@ -739,6 +754,7 @@ async def process_field_edit(message: Message, state: FSMContext):
                     f"Squad ID: {tariff_type['squad_id']}\n"
                     f"Лимит устройств: {tariff_type['hwid_limit']}\n"
                     f"Описание: {tariff_type['description'] or 'нет'}\n"
+                    f"Полное описание: {'есть' if tariff_type.get('full_description') else 'нет'}\n"
                     f"Статус: {'✅ Активен' if tariff_type['is_active'] else '❌ Неактивен'}\n\n"
                     f"Что хотите изменить?"
                 )
@@ -749,6 +765,7 @@ async def process_field_edit(message: Message, state: FSMContext):
                     [InlineKeyboardButton(text="📱 Лимит устройств",
                                           callback_data=f"edit_type_field_{entity_id}_hwid_limit")],
                     [InlineKeyboardButton(text="📄 Описание", callback_data=f"edit_type_field_{entity_id}_description")],
+                    [InlineKeyboardButton(text="📋 Полное описание", callback_data=f"edit_type_field_{entity_id}_full_description")],
                     [InlineKeyboardButton(
                         text="🔄 Переключить статус",
                         callback_data=f"toggle_type_{entity_id}"
@@ -1305,7 +1322,46 @@ async def start_mailing(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ У вас нет прав администратора", show_alert=True)
         return
 
+    await state.clear()
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Все пользователи бота", callback_data="mailing_aud_all")],
+        [InlineKeyboardButton(text="✅ С активной подпиской", callback_data="mailing_aud_active")],
+        [InlineKeyboardButton(text="⌛ С истёкшей подпиской", callback_data="mailing_aud_expired")],
+        [InlineKeyboardButton(text="🔁 С активной или истёкшей", callback_data="mailing_aud_both")],
+        [InlineKeyboardButton(text="❌ Отменить рассылку", callback_data="cancel_mailing")]
+    ])
+
+    await callback.message.edit_text(
+        "📢 <b>Создание рассылки</b>\n\n"
+        "Кому отправить сообщение?\n\n"
+        "<i>Активность определяется по дате окончания подписки. "
+        "В группы по подпискам не попадают забаненные и пользователи, "
+        "у которых подписки никогда не было.</i>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mailing_aud_"))
+async def choose_mailing_audience(callback: CallbackQuery, state: FSMContext):
+    if not await database.is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора", show_alert=True)
+        return
+
+    audience = callback.data[len("mailing_aud_"):]
+    if audience not in database.MAILING_AUDIENCES:
+        await callback.answer("❌ Неизвестная аудитория", show_alert=True)
+        return
+
+    recipients = await database.get_mailing_recipients(audience)
+    if not recipients:
+        await callback.answer("В этой группе пока нет пользователей", show_alert=True)
+        return
+
     await state.set_state(Mailing.content)
+    await state.update_data(audience=audience)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отменить рассылку", callback_data="cancel_mailing")]
@@ -1313,13 +1369,13 @@ async def start_mailing(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(
         "📢 <b>Создание рассылки</b>\n\n"
+        f"Получатели: <b>{database.MAILING_AUDIENCES[audience]}</b> — {len(recipients)} чел.\n\n"
         "Отправьте сообщение для рассылки.\n\n"
         "Поддерживаются:\n"
         "• Текст с форматированием\n"
         "• Фотография (1 шт)\n"
         "• Видео\n"
-        "• Документы\n\n"
-        "Сообщение будет доставлено ВСЕМ пользователям бота.",
+        "• Документы",
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -1467,9 +1523,12 @@ async def show_mailing_preview(message: Message, state: FSMContext):
     except Exception as e:
         await message.answer(f"❌ Ошибка при создании превью: {str(e)}")
 
+    audience = data.get('audience', 'all')
+    recipients_count = len(await database.get_mailing_recipients(audience))
     await message.answer(
-        "Подтвердите отправку рассылки всем пользователям:",
-        reply_markup=keyboard
+        f"Подтвердите отправку: <b>{database.MAILING_AUDIENCES[audience]}</b> — {recipients_count} чел.",
+        reply_markup=keyboard,
+        parse_mode="HTML"
     )
 
 
@@ -1494,7 +1553,8 @@ async def confirm_mailing(callback: CallbackQuery, state: FSMContext, bot):
     data = await state.get_data()
     content = data['content']
 
-    users = await get_all_users()
+    audience = data.get('audience', 'all')
+    users = await database.get_mailing_recipients(audience)
 
     total_users = len(users)
     if total_users == 0:
@@ -1503,7 +1563,7 @@ async def confirm_mailing(callback: CallbackQuery, state: FSMContext, bot):
         return
 
     status_message = await callback.message.edit_text(
-        f"📢 Начинаю рассылку...\n"
+        f"📢 Начинаю рассылку ({database.MAILING_AUDIENCES[audience]})...\n"
         f"Всего пользователей: {total_users}\n"
         f"Отправлено: 0/{total_users}"
     )
@@ -1512,8 +1572,7 @@ async def confirm_mailing(callback: CallbackQuery, state: FSMContext, bot):
     failed = 0
     blocked = 0
 
-    for user in users:
-        user_id = user[0]
+    for user_id in users:
 
         try:
             if content['content_type'] == 'text':

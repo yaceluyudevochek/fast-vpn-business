@@ -96,25 +96,75 @@ async def init_db():
                     )
                 """)
 
-        # Миграция: отдельный учёт того, что подписка по транзакции реально
-        # активирована (статус CONFIRMED сам по себе этого не гарантирует —
-        # его может выставить и проверка оплаты кнопкой в боте).
-        async with db.execute("PRAGMA table_info(payment_transactions)") as cursor:
-            payment_columns = {row[1] for row in await cursor.fetchall()}
-        if "activated_at" not in payment_columns:
-            await db.execute("ALTER TABLE payment_transactions ADD COLUMN activated_at TIMESTAMP")
-            await db.execute("ALTER TABLE payment_transactions ADD COLUMN activation_claimed_at TIMESTAMP")
-            # Все платежи, подтверждённые до миграции, считаем уже обработанными,
-            # чтобы повторный callback по старой транзакции не продлил подписку ещё раз
-            await db.execute("""
-                UPDATE payment_transactions
-                SET activated_at = COALESCE(confirmed_at, updated_at, CURRENT_TIMESTAMP)
-                WHERE status = 'CONFIRMED'
-            """)
-
         await db.commit()
+        await run_migrations(db)
         await create_default_tariffs(db)
         logger.info("✅ База данных инициализирована")
+
+
+# ======================================================
+# МИГРАЦИИ СХЕМЫ
+# ======================================================
+# Версия схемы хранится в PRAGMA user_version. Каждая миграция идемпотентна
+# (сама проверяет, нужно ли ей что-то делать), поэтому безопасна и для боевой
+# БД, где часть изменений уже была применена до появления версионирования.
+# Чтобы изменить схему — добавьте функцию в конец _MIGRATIONS, не правя старые.
+
+async def _column_names(db, table: str) -> set:
+    async with db.execute(f"PRAGMA table_info({table})") as cursor:
+        return {row[1] for row in await cursor.fetchall()}
+
+
+async def _add_column(db, table: str, column: str, definition: str) -> bool:
+    """Добавить колонку, если её ещё нет. Возвращает True, если добавили."""
+    if column in await _column_names(db, table):
+        return False
+    await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    return True
+
+
+async def _m001_payment_activation(db):
+    """Учёт реальной активации подписки по транзакции (v2.0.2)"""
+    added = await _add_column(db, "payment_transactions", "activated_at", "TIMESTAMP")
+    await _add_column(db, "payment_transactions", "activation_claimed_at", "TIMESTAMP")
+    if added:
+        # Все платежи, подтверждённые до миграции, считаем уже обработанными,
+        # чтобы повторный callback по старой транзакции не продлил подписку ещё раз
+        await db.execute("""
+            UPDATE payment_transactions
+            SET activated_at = COALESCE(confirmed_at, updated_at, CURRENT_TIMESTAMP)
+            WHERE status = 'CONFIRMED'
+        """)
+
+
+async def _m002_tariff_full_description(db):
+    """Полное описание тарифа (показывается на экране выбора срока)"""
+    await _add_column(db, "tariff_types", "full_description", "TEXT")
+
+
+async def _m003_trial_nudge(db):
+    """Статус напоминания триальщику, который не подключился: NULL / sent / connected"""
+    await _add_column(db, "subscriptions", "trial_nudge_status", "TEXT")
+
+
+_MIGRATIONS = [
+    (1, _m001_payment_activation),
+    (2, _m002_tariff_full_description),
+    (3, _m003_trial_nudge),
+]
+
+
+async def run_migrations(db):
+    async with db.execute("PRAGMA user_version") as cursor:
+        current = (await cursor.fetchone())[0]
+
+    for version, migration in _MIGRATIONS:
+        if version <= current:
+            continue
+        await migration(db)
+        await db.execute(f"PRAGMA user_version = {version}")
+        await db.commit()
+        logger.info(f"🧱 Применена миграция схемы БД #{version}: {migration.__name__}")
 
 
 async def create_default_tariffs(db):
@@ -488,6 +538,103 @@ async def get_all_users():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT telegram_id FROM users") as cursor:
             return await cursor.fetchall()
+
+
+MAILING_AUDIENCES = {
+    "all": "Все пользователи бота",
+    "active": "С активной подпиской",
+    "expired": "С истёкшей подпиской",
+    "both": "С активной или истёкшей подпиской",
+}
+
+
+def _is_subscription_active(expiry: Optional[str], now: datetime) -> bool:
+    if not expiry:
+        return False
+    try:
+        return datetime.fromisoformat(expiry.replace("Z", "+00:00")) > now
+    except ValueError:
+        return False
+
+
+async def get_mailing_recipients(audience: str) -> List[int]:
+    """
+    Получатели рассылки.
+      all     — все пользователи (как и раньше, включая забаненных);
+      active  — есть хотя бы одна действующая подписка;
+      expired — подписки были, но ни одна уже не действует;
+      both    — подписки есть/были (активные + истёкшие).
+    Активность определяется по дате окончания, а не по полю status, которое
+    может отставать (например, после ручного продления). Забаненные и
+    пользователи без подписок в отфильтрованные группы не попадают.
+    """
+    if audience not in MAILING_AUDIENCES:
+        raise ValueError(f"Неизвестная аудитория рассылки: {audience}")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        if audience == "all":
+            async with db.execute("SELECT telegram_id FROM users") as cursor:
+                return [row[0] for row in await cursor.fetchall()]
+
+        async with db.execute("""
+            SELECT u.telegram_id, s.subscription_expiry
+            FROM users u
+            JOIN subscriptions s ON s.telegram_id = u.telegram_id
+            WHERE COALESCE(u.role, 'user') != 'banned' AND s.status != 'DISABLED'
+        """) as cursor:
+            rows = await cursor.fetchall()
+
+    now = datetime.now().astimezone()
+    has_active, has_any = set(), set()
+    for telegram_id, expiry in rows:
+        has_any.add(telegram_id)
+        if _is_subscription_active(expiry, now):
+            has_active.add(telegram_id)
+
+    if audience == "active":
+        return sorted(has_active)
+    if audience == "expired":
+        return sorted(has_any - has_active)
+    return sorted(has_any)
+
+
+# ======================================================
+# НАПОМИНАНИЕ ТРИАЛЬЩИКАМ, КОТОРЫЕ НЕ ПОДКЛЮЧИЛИСЬ
+# ======================================================
+
+async def get_trial_nudge_candidates(min_age_hours: float, max_age_hours: float) -> List[Dict[str, Any]]:
+    """
+    Подписки-триалы, созданные от min_age до max_age часов назад, которым ещё не
+    отправляли напоминание и у владельцев которых нет ни одной оплаты.
+    (Триал, "навешенный" на уже существующую подписку, сюда не попадает: у неё
+    created_at старый.)
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT s.id, s.telegram_id, s.username_in_panel, s.subscription_expiry
+            FROM subscriptions s
+            WHERE s.trial_used = 1
+              AND s.trial_nudge_status IS NULL
+              AND s.status != 'DISABLED'
+              AND s.created_at <= datetime('now', ?)
+              AND s.created_at >= datetime('now', ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM payment_transactions p
+                  WHERE p.telegram_id = s.telegram_id AND p.status = 'CONFIRMED'
+              )
+        """, (f"-{min_age_hours} hours", f"-{max_age_hours} hours")) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def set_trial_nudge_status(subscription_id: int, status: str):
+    """status: 'sent' (напоминание отправлено) или 'connected' (уже пользуется, не беспокоим)"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE subscriptions SET trial_nudge_status = ? WHERE id = ?",
+            (status, subscription_id)
+        )
+        await db.commit()
 
 
 # ======================================================

@@ -79,6 +79,15 @@ class PanelAPI:
 
         return None
 
+    async def get_used_traffic_bytes(self, username: str) -> Optional[int]:
+        """Использованный трафик пользователя в байтах (None — если панель не ответила)"""
+        user = await self.get_user_by_username(username)
+        if not user:
+            return None
+        traffic = user.get("userTraffic") or {}
+        used = traffic.get("usedTrafficBytes", user.get("usedTrafficBytes"))
+        return int(used) if used is not None else 0
+
     async def get_user_by_telegram_id(self, telegram_id: int) -> Optional[Dict[str, Any]]:
         """Get user by telegram ID (для обратной совместимости)"""
         response = await self._request("GET", f"users/by-telegram-id/{telegram_id}")

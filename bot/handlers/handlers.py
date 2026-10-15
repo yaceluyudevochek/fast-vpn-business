@@ -161,10 +161,14 @@ async def show_plans_for_type(callback: CallbackQuery):
 
     keyboard.append([kb_button("back", "Назад к типам", callback_data="show_tariffs")])
 
+    # Полное описание (с форматированием, задаётся в админке) заменяет короткое,
+    # которое и так уже есть на кнопке выбора типа — чтобы не дублировать текст
+    details = tariff_type.get('full_description') or tariff_type.get('description') or ''
+
     text = (
         f"{E['diamond']} <b>{tariff_type['name']}</b>\n\n"
         f"{E['shield']} Лимит устройств: <b>{tariff_type['hwid_limit']}</b>\n"
-        f"{tariff_type['description'] or ''}\n\n"
+        f"{(chr(10) + details + chr(10)) if details else ''}\n"
         f"Выбери срок подписки {E['calendar']}"
     )
 

@@ -47,7 +47,7 @@ async def main():
     init_webhook(panel_api)
 
     # Инициализация и запуск напоминалки
-    reminder = SubscriptionReminder(bot, check_interval=60)
+    reminder = SubscriptionReminder(bot, check_interval=60, panel_api=panel_api)
     await reminder.start()
 
     # Регистрация роутеров
