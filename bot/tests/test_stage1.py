@@ -5,7 +5,7 @@ import sqlite3
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _bootstrap  # noqa: F401  (путь к проекту и конфиг)
 
 from database import db  # noqa: E402
 from services.reminder import SubscriptionReminder  # noqa: E402

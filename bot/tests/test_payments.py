@@ -6,7 +6,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _bootstrap  # noqa: F401  (путь к проекту и конфиг)
 
 from database import db  # noqa: E402
 from handlers import payment as pay  # noqa: E402
